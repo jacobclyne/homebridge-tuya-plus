@@ -750,7 +750,7 @@
             "dpStop": {
               "type": "integer",
               "placeholder": "103",
-              "description": "Datapoint identifier for the stop action (used only for the partial-open feature).",
+              "description": "Datapoint identifier for the stop action (used for partial open and stop-before-close).",
               "condition": {
                 "functionBody": "return model.devices && model.devices[arrayIndices] && ['SimpleGarageDoor'].includes(model.devices[arrayIndices].type);"
               }
@@ -758,7 +758,31 @@
             "dpState": {
               "type": "integer",
               "placeholder": "105",
-              "description": "Datapoint identifier for the reported state. Values 11 (stopped) and 12 (opening/open) are treated as OPEN; 13 (closing/closed) is treated as CLOSED.",
+              "description": "Datapoint identifier for the reported state. By default 11/12 mean OPEN and 13 means CLOSED. Configure stateOpen/stateMoving/stateClosed for controllers with distinct endpoints and a shared moving value.",
+              "condition": {
+                "functionBody": "return model.devices && model.devices[arrayIndices] && ['SimpleGarageDoor'].includes(model.devices[arrayIndices].type);"
+              }
+            },
+            "stateOpen": {
+              "type": "integer",
+              "placeholder": "3",
+              "description": "Optional raw state value for fully open. Setting any state mapping option enables the distinct-endpoint model; omitted values default to 3 (open), 4 (moving), 5 (closed). Leave all three empty to retain legacy 11/12/13 behavior.",
+              "condition": {
+                "functionBody": "return model.devices && model.devices[arrayIndices] && ['SimpleGarageDoor'].includes(model.devices[arrayIndices].type);"
+              }
+            },
+            "stateMoving": {
+              "type": "integer",
+              "placeholder": "4",
+              "description": "Optional raw state value for moving in either direction. Setting any state mapping option enables the distinct-endpoint model; omitted values default to 3 (open), 4 (moving), 5 (closed). Leave all three empty to retain legacy 11/12/13 behavior.",
+              "condition": {
+                "functionBody": "return model.devices && model.devices[arrayIndices] && ['SimpleGarageDoor'].includes(model.devices[arrayIndices].type);"
+              }
+            },
+            "stateClosed": {
+              "type": "integer",
+              "placeholder": "5",
+              "description": "Optional raw state value for fully closed. Setting any state mapping option enables the distinct-endpoint model; omitted values default to 3 (open), 4 (moving), 5 (closed). Leave all three empty to retain legacy 11/12/13 behavior.",
               "condition": {
                 "functionBody": "return model.devices && model.devices[arrayIndices] && ['SimpleGarageDoor'].includes(model.devices[arrayIndices].type);"
               }
@@ -766,7 +790,7 @@
             "stopBeforeCloseMs": {
               "type": "integer",
               "placeholder": "1500",
-              "description": "Optional. The controller ignores a close command while the gate is actively moving, so unless the state DP already reads 11 (stopped) the plugin sends stop, waits this many milliseconds, then sends close. Tune to roughly how long the gate takes to halt after a stop. Default 1500.",
+              "description": "Optional. Before closing a moving gate, send stop, wait this many milliseconds, then close. A configured fully-open state (or legacy state 11) permits a direct close. A configured fully-closed state needs no command. Default 1500.",
               "condition": {
                 "functionBody": "return model.devices && model.devices[arrayIndices] && ['SimpleGarageDoor'].includes(model.devices[arrayIndices].type);"
               }
@@ -774,7 +798,7 @@
             "partialOpenMs": {
               "type": "integer",
               "placeholder": "2000",
-              "description": "Optional. If set, exposes an extra stateful switch that mirrors whether the gate is currently open. Tapping it ON triggers a partial-open (the gate opens and then stops itself this many milliseconds later, leaving the gate partially open). Tapping it OFF triggers a standard full close. Leave empty to skip the switch.",
+              "description": "Optional. If set, exposes an extra stateful switch that is ON while open, opening or stopped part-way, and OFF while closed or closing. Tapping it ON triggers a partial-open (the gate opens and then stops itself this many milliseconds later, leaving the gate partially open). Tapping it OFF triggers a standard full close. Leave empty to skip the switch.",
               "condition": {
                 "functionBody": "return model.devices && model.devices[arrayIndices] && ['SimpleGarageDoor'].includes(model.devices[arrayIndices].type);"
               }

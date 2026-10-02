@@ -707,3 +707,285 @@ describe('SimpleGarageDoorAccessory — force switches', () => {
         expect(accessory.context.cachedTargetDoorState).toBe(TDS.CLOSED);
     });
 });
+
+// Exercise actual registration as well as state changes for the opt-in model.
+function makeMappedGarage(state = 5, context = {}, cachedTarget) {
+    const { makeMockCharacteristic, makeMockService } = require('./support/mocks');
+    const result = makeInstance(SimpleGarageDoorAccessory, { '105': state }, {
+        stateOpen: 3, stateMoving: 4, stateClosed: 5, partialOpenMs: 2000,
+        forceSwitches: true, ...context,
+    });
+    const { instance, device, accessory } = result;
+    installRealEvents(device);
+    const chars = new Map();
+    accessory._mockService.getCharacteristic.mockImplementation(type => {
+        if (!chars.has(type)) chars.set(type, makeMockCharacteristic());
+        return chars.get(type);
+    });
+    const switches = new Map(['partialOpen', 'forceOpen', 'forceClose'].map(id => [id, makeMockService()]));
+    accessory.getServiceById.mockImplementation((type, id) => switches.get(id));
+    accessory.context.cachedTargetDoorState = cachedTarget;
+    instance._registerCharacteristics(device.state);
+    result.report = value => {
+        device.state['105'] = value;
+        emitState(device, value);
+    };
+    result.switches = switches;
+    return result;
+}
+
+describe('SimpleGarageDoorAccessory — configurable endpoint and movement states', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    test.each([
+        [3, undefined, CDS.OPEN, TDS.OPEN],
+        [5, TDS.OPEN, CDS.CLOSED, TDS.CLOSED],
+        [4, TDS.OPEN, CDS.OPENING, TDS.OPEN],
+        [4, TDS.CLOSED, CDS.CLOSING, TDS.CLOSED],
+        [4, undefined, CDS.CLOSING, TDS.CLOSED],
+        [99, TDS.OPEN, CDS.OPEN, TDS.OPEN],
+    ])('Registers raw %s with cached target %s', (raw, cached, current, target) => {
+        const { instance, accessory } = makeMappedGarage(raw, {}, cached);
+        expect(instance.currentDoorState).toBe(current);
+        expect(instance.characteristicCurrentDoorState.value).toBe(current);
+        expect(instance._committedTarget).toBe(target);
+        expect(accessory.context.cachedTargetDoorState).toBe(target);
+    });
+
+    test('Accepts numeric strings and custom raw values', () => {
+        const { instance, report } = makeMappedGarage('30', { stateOpen: '30', stateMoving: '40', stateClosed: '50' });
+        expect(instance.currentDoorState).toBe(CDS.OPEN);
+        report('40');
+        expect(instance.currentDoorState).toBe(CDS.OPENING);
+        report('50');
+        expect(instance.currentDoorState).toBe(CDS.CLOSED);
+        expect(instance._committedTarget).toBe(TDS.CLOSED);
+        report(4);
+        expect(instance.currentDoorState).toBe(CDS.CLOSED);
+    });
+
+    test('Configuring one value opts in with defaults for omitted values', () => {
+        const { instance } = makeMappedGarage(3, { stateOpen: undefined, stateClosed: undefined });
+        expect(instance.currentDoorState).toBe(CDS.OPEN);
+        expect(instance._mapDpState(4)).toBe(CDS.OPENING);
+        expect(instance._mapDpState(5)).toBe(CDS.CLOSED);
+    });
+
+    test.each([{ stateOpen: 'bad' }, { stateMoving: 3 }, { stateClosed: false }])('Rejects invalid mapping %j', context => {
+        expect(() => makeMappedGarage(5, context)).toThrow();
+    });
+
+    test('Actual registration without mapping retains legacy behavior', () => {
+        const { instance } = makeMappedGarage(11, { stateOpen: undefined, stateMoving: undefined, stateClosed: undefined });
+        expect(instance.currentDoorState).toBe(CDS.OPEN);
+        expect(instance._mapDpState(12)).toBe(CDS.OPEN);
+        expect(instance._mapDpState(13)).toBe(CDS.CLOSED);
+        expect(instance._mapDpState(4)).toBeNull();
+    });
+
+    test('Opening, closing and repeat requests use the committed target', () => {
+        const { instance, device, report, accessory } = makeMappedGarage();
+        instance.setTargetDoorState(TDS.OPEN);
+        report(4);
+        expect(instance.currentDoorState).toBe(CDS.OPENING);
+        expect(instance.characteristicPartialOpen.value).toBe(true);
+        expect(instance._committedTarget).toBe(TDS.OPEN);
+        instance.setTargetDoorState(TDS.OPEN);
+        expect(device.update).toHaveBeenCalledTimes(1);
+        report(3);
+        expect(instance.currentDoorState).toBe(CDS.OPEN);
+        instance.setTargetDoorState(TDS.CLOSED);
+        expect(device.update).toHaveBeenLastCalledWith({ '102': true });
+        expect(instance.pendingCloseTimer).toBeNull();
+        report(4);
+        expect(instance.currentDoorState).toBe(CDS.CLOSING);
+        expect(instance.characteristicPartialOpen.value).toBe(false);
+        expect(instance._committedTarget).toBe(TDS.CLOSED);
+        expect(accessory.context.cachedTargetDoorState).toBe(TDS.CLOSED);
+        instance.setTargetDoorState(TDS.CLOSED);
+        expect(device.update).toHaveBeenCalledTimes(2);
+        report(5);
+        expect(instance.currentDoorState).toBe(CDS.CLOSED);
+    });
+
+    test('Moving uses stop, configured wait, close; movement reports never change the target', () => {
+        const { instance, device, report } = makeMappedGarage(4, { stopBeforeCloseMs: 300 }, TDS.OPEN);
+        instance.setTargetDoorState(TDS.CLOSED);
+        expect(device.update).toHaveBeenLastCalledWith({ '103': true });
+        report(4);
+        expect(instance._committedTarget).toBe(TDS.CLOSED);
+        jest.advanceTimersByTime(299);
+        expect(device.update).toHaveBeenCalledTimes(1);
+        jest.advanceTimersByTime(1);
+        expect(device.update).toHaveBeenLastCalledWith({ '102': true });
+        report(4);
+        expect(instance.currentDoorState).toBe(CDS.CLOSING);
+        instance.setTargetDoorState(TDS.CLOSED);
+        expect(device.update).toHaveBeenCalledTimes(2);
+    });
+
+    test('A closed endpoint during the wait cancels the trailing close', () => {
+        const { instance, device, report } = makeMappedGarage(4, {}, TDS.OPEN);
+        instance.setTargetDoorState(TDS.CLOSED);
+        report(5);
+        jest.advanceTimersByTime(1500);
+        expect(device.update).toHaveBeenCalledTimes(1);
+        expect(instance.currentDoorState).toBe(CDS.CLOSED);
+    });
+
+    test('Already closed needs no close command even with a stale target', () => {
+        const { instance, device } = makeMappedGarage();
+        instance._committedTarget = TDS.OPEN;
+        instance.setTargetDoorState(TDS.CLOSED);
+        jest.advanceTimersByTime(5000);
+        expect(device.update).not.toHaveBeenCalled();
+    });
+
+    test('Reopening during stop-before-close cancels close and changes movement direction', () => {
+        const { instance, device, report } = makeMappedGarage(4, {}, TDS.OPEN);
+        instance.setTargetDoorState(TDS.CLOSED);
+        instance.setTargetDoorState(TDS.OPEN);
+        report(4);
+        jest.advanceTimersByTime(5000);
+        expect(device.update.mock.calls).toEqual([[{ '103': true }], [{ '101': true }]]);
+        expect(instance.currentDoorState).toBe(CDS.OPENING);
+    });
+
+    test('External endpoint reports synchronize both targets without sending commands', () => {
+        const { instance, device, report, accessory } = makeMappedGarage();
+        for (const [raw, target] of [[3, TDS.OPEN], [5, TDS.CLOSED]]) {
+            report(raw);
+            expect(instance._committedTarget).toBe(target);
+            expect(accessory.context.cachedTargetDoorState).toBe(target);
+            expect(instance.characteristicTargetDoorState.value).toBe(target);
+        }
+        expect(device.update).not.toHaveBeenCalled();
+    });
+
+    test('Partial stop survives repeated MOVING reports and the switch can close it', async () => {
+        const { instance, device, report } = makeMappedGarage();
+        instance._handlePartialOpen();
+        jest.advanceTimersByTime(10000);
+        expect(device.update).toHaveBeenCalledTimes(1);
+        instance.setTargetDoorState(TDS.OPEN);
+        report(4);
+        jest.advanceTimersByTime(2000);
+        await Promise.resolve();
+        await Promise.resolve();
+        report(4);
+        expect(instance.currentDoorState).toBe(CDS.STOPPED);
+        expect(instance._committedTarget).toBe(TDS.OPEN);
+        expect(instance.characteristicPartialOpen.value).toBe(true);
+        const getSwitch = instance.characteristicPartialOpen.onGet.mock.calls[0][0];
+        expect(getSwitch()).toBe(true);
+        instance.characteristicPartialOpen.onSet.mock.calls[0][0](false);
+        expect(instance._stoppedPartWay).toBe(false);
+        jest.advanceTimersByTime(1500);
+        report(4);
+        expect(instance.currentDoorState).toBe(CDS.CLOSING);
+        expect(device.update.mock.calls).toEqual([[{ '101': true }], [{ '103': true }], [{ '103': true }], [{ '102': true }]]);
+    });
+
+    test('Force Open resumes a partial stop, while duplicate door requests remain ignored', async () => {
+        const { instance, device, report } = makeMappedGarage();
+        instance._handlePartialOpen();
+        report(4);
+        jest.advanceTimersByTime(2000);
+        await Promise.resolve();
+        await Promise.resolve();
+        instance.setTargetDoorState(TDS.OPEN);
+        expect(device.update).toHaveBeenCalledTimes(2);
+        instance.characteristicForceOpen.onSet.mock.calls[0][0](true);
+        expect(instance.currentDoorState).toBe(CDS.OPENING);
+        expect(device.update).toHaveBeenLastCalledWith({ '101': true });
+        jest.advanceTimersByTime(1000);
+        expect(device.update).toHaveBeenCalledTimes(3);
+    });
+
+    test('Reaching fully open cancels a partial timer and needs no further partial stop', () => {
+        const { instance, device, report } = makeMappedGarage();
+        instance._handlePartialOpen();
+        report(4);
+        report(3);
+        jest.advanceTimersByTime(5000);
+        expect(device.update).toHaveBeenCalledTimes(1);
+        instance._handlePartialOpen();
+        expect(instance.partialPending).toBe(false);
+        jest.advanceTimersByTime(5000);
+        expect(device.update).toHaveBeenCalledTimes(2);
+    });
+
+    test('Partial stop retries preserve STOPPED until a definitive endpoint clears it', async () => {
+        const { instance, device, report } = makeMappedGarage();
+        instance._handlePartialOpen();
+        report(4);
+        jest.advanceTimersByTime(2600);
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(device.update.mock.calls).toEqual([[{ '101': true }], [{ '103': true }], [{ '103': true }], [{ '103': true }]]);
+        report(4);
+        expect(instance.currentDoorState).toBe(CDS.STOPPED);
+        report(5);
+        expect(instance._stoppedPartWay).toBe(false);
+        expect(instance.currentDoorState).toBe(CDS.CLOSED);
+        expect(instance._committedTarget).toBe(TDS.CLOSED);
+        report(3);
+        expect(instance.currentDoorState).toBe(CDS.OPEN);
+    });
+
+    test('An endpoint after a partial stop cancels remaining stop retries', async () => {
+        const { instance, device, report } = makeMappedGarage();
+        instance._handlePartialOpen();
+        report(4);
+        jest.advanceTimersByTime(2000);
+        report(3);
+        await Promise.resolve();
+        await Promise.resolve();
+        jest.advanceTimersByTime(1000);
+        expect(device.update).toHaveBeenCalledTimes(2);
+        expect(instance.currentDoorState).toBe(CDS.OPEN);
+        expect(instance._stoppedPartWay).toBe(false);
+    });
+
+    test('Failed stop writes never claim the gate is stopped', async () => {
+        const { instance, device, report } = makeMappedGarage();
+        instance._handlePartialOpen();
+        report(4);
+        device.update.mockReturnValue(false);
+        jest.advanceTimersByTime(2000);
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(instance.currentDoorState).toBe(CDS.OPENING);
+        expect(instance._stoppedPartWay).toBe(false);
+    });
+
+    test('A superseded asynchronous stop cannot overwrite a newer movement', async () => {
+        const { instance, device, report } = makeMappedGarage();
+        instance._handlePartialOpen();
+        report(4);
+        let finish;
+        device.update.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+        jest.advanceTimersByTime(2000);
+        instance.setTargetDoorState(TDS.CLOSED);
+        finish(true);
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(instance.currentDoorState).toBe(CDS.CLOSING);
+        expect(instance._stoppedPartWay).toBe(false);
+    });
+
+    test('Offline reads and writes report No Response and do not mark a partial stop successful', async () => {
+        const { instance, device, report } = makeMappedGarage();
+        instance._handlePartialOpen();
+        report(4);
+        device.connected = false;
+        expect(() => instance.setTargetDoorState(TDS.CLOSED)).toThrow(HAP.HapStatusError);
+        expect(() => instance._handlePartialOpen()).toThrow(HAP.HapStatusError);
+        expect(() => instance.characteristicCurrentDoorState.onGet.mock.calls[0][0]()).toThrow(HAP.HapStatusError);
+        jest.advanceTimersByTime(5000);
+        await Promise.resolve();
+        expect(device.update).toHaveBeenCalledTimes(1);
+        expect(instance._stoppedPartWay).toBe(false);
+    });
+});

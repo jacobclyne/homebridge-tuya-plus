@@ -548,6 +548,36 @@ the status DP already reads `11` (stopped, e.g. after a partial-open or an
 external stop, where close is accepted immediately), a close is sent as
 **stop → wait `stopBeforeCloseMs` → close**. There is no obstruction detection.
 
+
+For controllers reporting `3` = fully open, `4` = moving in either direction,
+and `5` = fully closed, add these device options (these are **values on the
+state DP**, not command DP identifiers):
+
+```json
+"stateOpen": 3,
+"stateMoving": 4,
+"stateClosed": 5
+```
+
+Setting any of these options enables the distinct-endpoint model; omitted
+values default to `3`/`4`/`5`. Values must be distinct integers. Leave all three
+unset to preserve the legacy behavior described above. Other numeric mappings
+are supported too.
+
+In this mode HomeKit shows **Open** at `3`, **Closed** at `5`, and **Opening**
+or **Closing** at `4` according to the last requested/committed target. On
+startup, a moving report uses the saved target (default Closed). A fully open
+gate closes directly; a moving gate uses stop → wait → close; a fully closed
+gate needs no close command. Only endpoint reports reconcile the target.
+
+After a successful partial-open stop command, HomeKit shows **Stopped**, even
+if the controller continues reporting `4`. The partial switch stays ON, so
+turning it OFF closes the gate. Force Open can resume opening from this local
+stopped state. A new plugin command or a definite endpoint clears it. The
+shared moving value cannot identify an external reversal, stop, or restart
+from a partial stop; external operation is synchronized once an endpoint is
+reported. This local stopped state is not persisted across plugin restarts.
+
 ```json5
 {
     "name": "My Sliding Gate",
